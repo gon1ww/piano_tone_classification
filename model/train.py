@@ -10,6 +10,9 @@ from modelscope.utils.constant import DownloadMode
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
 import seaborn as sns
+import gc
+
+from model import ImprovedPianoClassifier
 
 # 获取项目根目录
 ROOT_DIR = Path(__file__).parent.parent
@@ -22,50 +25,82 @@ import torch.optim as optim
 
 
 def prepare_dataset():
-    """下载并准备数据集"""
+    """下载并准备eval数据集"""
     # 检查数据集是否已存在
-    data_dir = os.path.join(ROOT_DIR, "data", "audio")
+    data_dir = os.path.join(ROOT_DIR, "data", "eval")
     if os.path.exists(data_dir):
         print("Dataset already exists, skipping download...")
         return
 
-    # 下载数据集
+    # 下载完整的eval数据集
+    print("\nLoading eval dataset...")
     ds = MsDataset.load(
         'ccmusic-database/pianos',
         subset_name='eval'
     )
 
+    # 获取数据集总大小
+    dataset = list(ds['train'])  # 转换为列表以便访问
+    total_size = len(dataset)
+    print(f"Total dataset size: {total_size}")
+
+    # 计算划分大小
+    train_size = int(0.8 * total_size)
+    val_size = int(0.1 * total_size)
+    test_size = total_size - train_size - val_size
+
+    print(f"\nSplitting dataset into:")
+    print(f"Train set: {train_size} samples")
+    print(f"Validation set: {val_size} samples")
+    print(f"Test set: {test_size} samples")
+
     # 创建必要的目录
-    splits = ['train', 'validation', 'test']
+    splits = {
+        'train': (0, train_size),
+        'validation': (train_size, train_size + val_size),
+        'test': (train_size + val_size, total_size)
+    }
 
-    for split in splits:
-        split_dir = os.path.join(ROOT_DIR, "data", "eval", split)
-        os.makedirs(split_dir)
-
-        # 将音频文件移动到对应目录
-        split_data = ds[split]  # 获取对应的数据集划分
-
-        for item in split_data:
+    for split_name, (start_idx, end_idx) in splits.items():
+        split_dir = os.path.join(ROOT_DIR, "data", "eval", split_name)
+        os.makedirs(split_dir, exist_ok=True)
+        
+        print(f"\nProcessing {split_name} split...")
+        
+        # 获取该划分的数据
+        split_data = dataset[start_idx:end_idx]
+        total_items = len(split_data)
+        print(f"Processing {total_items} items in {split_name} split")
+        
+        for idx, item in enumerate(split_data):
             try:
-                mel_path = item['mel']['path']
+                mel_img = item['mel']  # 获取梅尔频谱图PIL图像对象
                 label = item['label']
                 label_dir = os.path.join(split_dir, str(label))
                 os.makedirs(label_dir, exist_ok=True)
-
-                filename = os.path.basename(mel_path)
-                shutil.copy2(mel_path, os.path.join(label_dir, filename))
-
+                
+                # 保存梅尔频谱图
+                filename = f"mel_{idx}.jpg"
+                save_path = os.path.join(label_dir, filename)
+                mel_img.save(save_path, "JPEG")
+                
+                # 打印进度
+                if (idx + 1) % 100 == 0:
+                    print(f"Processed {idx + 1}/{total_items} items in {split_name} split")
+                    
             except Exception as e:
-                print(f"Error processing item: {item}")
-                print(f"Error message: {str(e)}")
+                print(f"Error processing item {idx} in {split_name} split: {str(e)}")
+                print(f"Item content: {item}")
                 continue
+
+    print("\nDataset preparation completed!")
 
 
 def load_dataset_splits():
     # 读取数据集划分信息
     with open(os.path.join(ROOT_DIR, "dataset_infos.json"), "r") as f:
         dataset_info = json.load(f)
-    return dataset_info["default"]["splits"]
+    return dataset_info["eval"]["splits"]  # 使用eval数据集的划分信息
 
 
 def plot_training_curves(train_losses, train_accs, val_losses, val_accs):
@@ -95,18 +130,6 @@ def plot_training_curves(train_losses, train_accs, val_losses, val_accs):
     plt.close()
 
 
-def plot_confusion_matrix(y_true, y_pred, classes, filename='confusion_matrix.png'):
-    """绘制混淆矩阵并保存为PNG文件"""
-    cm = confusion_matrix(y_true, y_pred)
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
-    plt.ylabel('True label')
-    plt.xlabel('Predicted label')
-    plt.title('Confusion Matrix')
-    plt.savefig(os.path.join(ROOT_DIR, "model", "picture", filename))
-    plt.close()
-
-
 def main():
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -121,9 +144,9 @@ def main():
     splits = load_dataset_splits()
 
     # 加载训练集、验证集和测试集
-    train_dataset = PianoDataset(os.path.join(ROOT_DIR, "data", "mel_spectrogram", "train"))
-    val_dataset = PianoDataset(os.path.join(ROOT_DIR, "data", "mel_spectrogram", "validation"))
-    test_dataset = PianoDataset(os.path.join(ROOT_DIR, "data", "mel_spectrogram", "test"))
+    train_dataset = PianoDataset(os.path.join(ROOT_DIR, "data", "eval", "train"))
+    val_dataset = PianoDataset(os.path.join(ROOT_DIR, "data", "eval", "validation"))
+    test_dataset = PianoDataset(os.path.join(ROOT_DIR, "data", "eval", "test"))
 
     print(f"Train set size: {len(train_dataset)}")
     print(f"Validation set size: {len(val_dataset)}")
@@ -132,40 +155,40 @@ def main():
     # 创建数据加载器
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
-        batch_size=16,  # 批量大小
+        batch_size=16,  # 增大批量大小
         shuffle=True,
-        num_workers=2,  # 工作进程数
+        num_workers=0,
         pin_memory=True,
-        persistent_workers=True,  # 保持工作进程存活
-        prefetch_factor=2  # 预取数量
+        drop_last=True  # 丢弃最后一个不完整的批次
     )
     val_loader = torch.utils.data.DataLoader(
         val_dataset,
-        batch_size=16,
+        batch_size=16,  # 增大批量大小
         shuffle=False,
-        num_workers=2,
+        num_workers=0,
         pin_memory=True,
-        persistent_workers=True
+        drop_last=True  # 丢弃最后一个不完整的批次
     )
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
-        batch_size=16,
+        batch_size=16,  # 增大批量大小
         shuffle=False,
-        num_workers=2,
+        num_workers=0,
         pin_memory=True,
-        persistent_workers=True
+        drop_last=True  # 丢弃最后一个不完整的批次
     )
 
     # 初始化模型
     num_classes = len(set(train_dataset.labels))
-    model = PianoClassifier(num_classes).to(device)
+    # model = PianoClassifier(num_classes).to(device)
+    model = ImprovedPianoClassifier(num_classes).to(device)
 
     # 定义损失函数和优化器
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     # 训练模型
-    num_epochs = 20
+    num_epochs = 30
     best_val_acc = 0.0
 
     # 添加列表来记录训练过程
@@ -173,10 +196,6 @@ def main():
     train_accs = []
     val_losses = []
     val_accs = []
-
-    # 用于记录所有的真实标签和预测标签
-    all_true_labels = []
-    all_pred_labels = []
 
     for epoch in range(num_epochs):
         print(f"\nEpoch {epoch + 1}/{num_epochs}")
@@ -203,19 +222,6 @@ def main():
             best_val_acc = val_acc
             torch.save(model.state_dict(), os.path.join(ROOT_DIR, "model", "best_model.pth"))
             print(f"Model saved with validation accuracy: {val_acc:.2f}%")
-
-        # 在验证集上进行预测以生成混淆矩阵
-        model.eval()
-        with torch.no_grad():
-            for inputs, labels in val_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
-                _, predicted = outputs.max(1)
-                all_true_labels.extend(labels.cpu().numpy())
-                all_pred_labels.extend(predicted.cpu().numpy())
-
-    # 绘制混淆矩阵
-    plot_confusion_matrix(all_true_labels, all_pred_labels, classes=list(range(num_classes)))
 
     # 绘制训练曲线
     plot_training_curves(train_losses, train_accs, val_losses, val_accs)

@@ -1,32 +1,36 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchaudio
 from torch.utils.data import Dataset
 import os
+from PIL import Image
 import numpy as np
 from tqdm import tqdm
-import soundfile as sf
+import torchvision.transforms as transforms
 
-# 音频数据集类
+# 频谱图数据集类
 class PianoDataset(Dataset):
-    def __init__(self, audio_dir, transform=None):
-        """初始化数据集，加载音频文件和标签"""
-        self.audio_dir = audio_dir
-        self.transform = transform
+    def __init__(self, mel_dir, transform=None):
+        """初始化数据集，加载梅尔频谱图和标签"""
+        self.mel_dir = mel_dir
+        self.transform = transform or transforms.Compose([
+            transforms.Resize((224, 224)),  # 调整图像大小到更小的尺寸
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485], std=[0.229])
+        ])
         self.samples = []
         self.labels = []
         
-        # 遍历音频文件夹
-        for label_idx, piano_type in enumerate(sorted(os.listdir(audio_dir))):
-            piano_path = os.path.join(audio_dir, piano_type)
+        # 遍历频谱图文件夹
+        for label_idx, piano_type in enumerate(sorted(os.listdir(mel_dir))):
+            piano_path = os.path.join(mel_dir, piano_type)
             if os.path.isdir(piano_path):
-                for audio_file in os.listdir(piano_path):
-                    if audio_file.endswith('.wav'):
-                        self.samples.append(os.path.join(piano_path, audio_file))
+                for mel_file in os.listdir(piano_path):
+                    if mel_file.endswith('.jpg'):
+                        self.samples.append(os.path.join(piano_path, mel_file))
                         self.labels.append(label_idx)
         
-        print(f"Loaded {len(self.samples)} samples from {audio_dir}")
+        print(f"Loaded {len(self.samples)} samples from {mel_dir}")
     
     def __len__(self):
         """返回数据集的大小"""
@@ -34,121 +38,112 @@ class PianoDataset(Dataset):
     
     def __getitem__(self, idx):
         """获取指定索引的样本和标签"""
-        audio_path = self.samples[idx]
+        mel_path = self.samples[idx]
         try:
-            # 使用 sf.read 替代 torchaudio.load，可以更好地控制内存
-            waveform, sample_rate = sf.read(audio_path, dtype='float32')
+            # 读取梅尔频谱图
+            mel_img = Image.open(mel_path).convert('L')  # 转换为灰度图
             
-            # 转换为 torch tensor 并调整维度
-            waveform = torch.from_numpy(waveform.T)
+            # 应用变换
+            mel_tensor = self.transform(mel_img)
             
-            # 如果是双声道，转换为单声道
-            if waveform.size(0) > 1:
-                waveform = torch.mean(waveform, dim=0, keepdim=True)
-            
-            # 限制最大长度，避免过长的音频
-            max_length = 220500  # 5秒 * 44100 采样率
-            if waveform.shape[1] > max_length:
-                start = torch.randint(0, waveform.shape[1] - max_length, (1,))
-                waveform = waveform[:, start:start + max_length]
-            else:
-                # 填充到固定长度
-                pad_length = max_length - waveform.shape[1]
-                waveform = F.pad(waveform, (0, pad_length))
-            
-            # 提取梅尔频谱图特征
-            mel_spectrogram = torchaudio.transforms.MelSpectrogram(
-                sample_rate=sample_rate,
-                n_fft=1024,  # 减小 FFT 大小
-                hop_length=256,  # 减小跳跃长度
-                n_mels=64,  # 减小梅尔频带数
-                power=1.0  # 使用幅度谱而不是功率谱
-            )(waveform)
-            
-            # 转换为分贝单位并规范化
-            mel_spectrogram = torchaudio.transforms.AmplitudeToDB()(mel_spectrogram)
-            mel_spectrogram = (mel_spectrogram - mel_spectrogram.mean()) / (mel_spectrogram.std() + 1e-8)
-            
-            if self.transform:
-                mel_spectrogram = self.transform(mel_spectrogram)
-            
-            # 确保输入维度正确
-            mel_spectrogram = mel_spectrogram.squeeze()
-            if len(mel_spectrogram.shape) == 2:
-                mel_spectrogram = mel_spectrogram.unsqueeze(0)
-            
-            # 转换为 float32 以节省内存
-            mel_spectrogram = mel_spectrogram.float()
-            
-            return mel_spectrogram, self.labels[idx]
+            return mel_tensor, self.labels[idx]
             
         except Exception as e:
-            print(f"Error processing file {audio_path}: {str(e)}")
+            print(f"Error processing file {mel_path}: {str(e)}")
             # 返回一个空白的频谱图作为替代
-            return torch.zeros((1, 64, 172), dtype=torch.float32), self.labels[idx]
+            return torch.zeros((1, 224, 224), dtype=torch.float32), self.labels[idx]
 
 # 定义模型
-
-# class PianoClassifier(nn.Module):
-#     def __init__(self, num_classes):
-#         super(PianoClassifier, self).__init__()
-#         self.conv1 = nn.Conv2d(1, 16, kernel_size=3, padding=1) 
-#         self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
-#         self.conv3 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-#         self.pool = nn.MaxPool2d(2, 2)
-#         self.adaptive_pool = nn.AdaptiveAvgPool2d((8, 8))
-#         self.dropout = nn.Dropout(0.3)
-#         self.fc1 = nn.Linear(64 * 8 * 8, 256)
-#         self.fc2 = nn.Linear(256, num_classes)
-        
-#     def forward(self, x):
-#         x = self.pool(F.relu(self.conv1(x)))
-#         x = self.pool(F.relu(self.conv2(x)))
-#         x = self.pool(F.relu(self.conv3(x)))
-#         x = self.adaptive_pool(x)
-#         x = x.view(-1, 64 * 8 * 8)
-#         x = self.dropout(F.relu(self.fc1(x)))
-#         x = self.fc2(x)
-#         return x
-
 class PianoClassifier(nn.Module):
     def __init__(self, num_classes):
         """初始化模型架构"""
         super(PianoClassifier, self).__init__()
-        
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, padding=1),
-            nn.BatchNorm2d(16),
+
+        # 卷积层
+        self.features = nn.Sequential(
+            # 第一个卷积块
+            nn.Conv2d(1, 8, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.1)
-        )
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
+            nn.MaxPool2d(2, 2),
+            # 第二个卷积块
+            nn.Conv2d(8, 16, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.1)
+            nn.MaxPool2d(2, 2)
         )
-        
-        self.pool = nn.MaxPool2d(2, 2)
+
+        # 自适应池化层
         self.adaptive_pool = nn.AdaptiveAvgPool2d((8, 8))
-        
-        # 减小全连接层的维度
-        self.fc1 = nn.Sequential(
-            nn.Linear(32 * 8 * 8, 128),  # 减小隐藏层维度
-            nn.BatchNorm1d(128),
+
+        # 全连接层
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Linear(16 * 8 * 8, 64),
             nn.ReLU(),
-            nn.Dropout(0.3)  # 减小dropout率
+            nn.Linear(64, num_classes)
         )
-        self.fc2 = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        """前向传播"""
+        # 特征提取
+        x = self.features(x)
+        x = self.adaptive_pool(x)
+
+        # 展平
+        x = x.view(x.size(0), -1)
+
+        # 分类
+        x = self.classifier(x)
+        return x
+
+class ImprovedPianoClassifier(nn.Module):
+    def __init__(self, num_classes):
+        """初始化模型架构"""
+        super(ImprovedPianoClassifier, self).__init__()
+        
+        # 卷积层
+        self.features = nn.Sequential(
+            # 第一个卷积块
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout2d(0.1),
+            
+            # 第二个卷积块
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout2d(0.1),
+            
+            # 第三个卷积块
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout2d(0.1)
+        )
+        
+        # 自适应池化层
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
+        
+        # 全连接层
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(64 * 4 * 4, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, num_classes)
+        )
         
     def forward(self, x):
         """前向传播"""
-        x = self.pool(self.conv1(x))
-        x = self.pool(self.conv2(x))
+        # 特征提取
+        x = self.features(x)
         x = self.adaptive_pool(x)
-        x = x.view(-1, 32 * 8 * 8)
-        x = self.fc1(x)
-        x = self.fc2(x)
+        
+        # 展平
+        x = x.view(x.size(0), -1)
+        
+        # 分类
+        x = self.classifier(x)
         return x
 
 # 训练函数
