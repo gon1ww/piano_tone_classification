@@ -1,0 +1,28 @@
+{
+  "default": {
+    "features": {
+      "audio": {"_type": "Audio"},
+      "mel": {"_type": "Image"},
+      "label": {"_type": "Value"},
+      "pitch": {"_type": "Value"},
+      "bass_score": {"_type": "Value"},
+      "mid_score": {"_type": "Value"},
+      "treble_score": {"_type": "Value"},
+      "avg_score": {"_type": "Value"}
+    },
+    "splits": {
+      "train": {
+        "name": "train",
+        "dataset_name": "pianos"
+      },
+      "validation": {
+        "name": "validation",
+        "dataset_name": "pianos"
+      },
+      "test": {
+        "name": "test",
+        "dataset_name": "pianos"
+      }
+    }
+  }
+}
