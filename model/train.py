@@ -1,25 +1,21 @@
-import torch
-from torch.utils.data import random_split
-import sys
-import os
-from pathlib import Path
 import json
-import shutil
-from modelscope.msdatasets import MsDataset
-from modelscope.utils.constant import DownloadMode
+import os
+import sys
+from pathlib import Path
+
 import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix
-import seaborn as sns
-import gc
+import torch
+from modelscope.msdatasets import MsDataset
 
 from model import ImprovedPianoClassifier
+from model import PianoClassifier
 
 # 获取项目根目录
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.append(str(ROOT_DIR))
 
 # 直接从当前目录导入
-from model import PianoDataset, PianoClassifier, train_model, validate_model
+from model import PianoDataset, train_model, validate_model
 import torch.nn as nn
 import torch.optim as optim
 
@@ -64,30 +60,30 @@ def prepare_dataset():
     for split_name, (start_idx, end_idx) in splits.items():
         split_dir = os.path.join(ROOT_DIR, "data", "eval", split_name)
         os.makedirs(split_dir, exist_ok=True)
-        
+
         print(f"\nProcessing {split_name} split...")
-        
+
         # 获取该划分的数据
         split_data = dataset[start_idx:end_idx]
         total_items = len(split_data)
         print(f"Processing {total_items} items in {split_name} split")
-        
+
         for idx, item in enumerate(split_data):
             try:
                 mel_img = item['mel']  # 获取梅尔频谱图PIL图像对象
                 label = item['label']
                 label_dir = os.path.join(split_dir, str(label))
                 os.makedirs(label_dir, exist_ok=True)
-                
+
                 # 保存梅尔频谱图
                 filename = f"mel_{idx}.jpg"
                 save_path = os.path.join(label_dir, filename)
                 mel_img.save(save_path, "JPEG")
-                
+
                 # 打印进度
                 if (idx + 1) % 100 == 0:
                     print(f"Processed {idx + 1}/{total_items} items in {split_name} split")
-                    
+
             except Exception as e:
                 print(f"Error processing item {idx} in {split_name} split: {str(e)}")
                 print(f"Item content: {item}")
@@ -130,6 +126,35 @@ def plot_training_curves(train_losses, train_accs, val_losses, val_accs):
     plt.close()
 
 
+def select_model_type():
+    """让用户选择要使用的模型类型"""
+    while True:
+        print("\nSelect Model Type:")
+        print("1. PianoClassifier (Basic Model)")
+        print("2. ImprovedPianoClassifier (Advanced Model)")
+        choice = input("\nEnter your choice (1-2): ")
+        
+        if choice == '1':
+            return PianoClassifier, "piano_classifier"
+        elif choice == '2':
+            return ImprovedPianoClassifier, "improved_piano_classifier"
+        else:
+            print("Invalid choice. Please try again.")
+
+
+def get_num_epochs():
+    """让用户输入训练轮数"""
+    while True:
+        try:
+            epochs = int(input("\nEnter number of epochs for training (1-50): "))
+            if 1 <= epochs <= 50:
+                return epochs
+            else:
+                print("Please enter a number between 1 and 50.")
+        except ValueError:
+            print("Please enter a valid number.")
+
+
 def main():
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -138,7 +163,15 @@ def main():
     # 准备数据集
     print("Preparing dataset...")
     prepare_dataset()
-    a = input("Press Enter to continue...")
+
+    stop = input("Press Enter to continue...")
+    # 选择模型类型
+    model_class, model_name = select_model_type()
+    print(f"\nSelected model: {model_name}")
+
+    # 获取训练轮数
+    num_epochs = get_num_epochs()
+    print(f"\nTraining for {num_epochs} epochs")
 
     # 获取数据集划分信息
     splits = load_dataset_splits()
@@ -155,40 +188,39 @@ def main():
     # 创建数据加载器
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
-        batch_size=16,  # 增大批量大小
+        batch_size=16,
         shuffle=True,
         num_workers=0,
         pin_memory=True,
-        drop_last=True  # 丢弃最后一个不完整的批次
+        drop_last=True
     )
     val_loader = torch.utils.data.DataLoader(
         val_dataset,
-        batch_size=16,  # 增大批量大小
+        batch_size=16,
         shuffle=False,
         num_workers=0,
         pin_memory=True,
-        drop_last=True  # 丢弃最后一个不完整的批次
+        drop_last=True
     )
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
-        batch_size=16,  # 增大批量大小
+        batch_size=16,
         shuffle=False,
         num_workers=0,
         pin_memory=True,
-        drop_last=True  # 丢弃最后一个不完整的批次
+        drop_last=True
     )
 
     # 初始化模型
     num_classes = len(set(train_dataset.labels))
-    # model = PianoClassifier(num_classes).to(device)
-    model = ImprovedPianoClassifier(num_classes).to(device)
+    model = model_class(num_classes).to(device)
+    print(f"\nInitialized {model_class.__name__} with {num_classes} classes")
 
     # 定义损失函数和优化器
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     # 训练模型
-    num_epochs = 30
     best_val_acc = 0.0
 
     # 添加列表来记录训练过程
@@ -220,7 +252,9 @@ def main():
         # 保存最佳模型
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            torch.save(model.state_dict(), os.path.join(ROOT_DIR, "model", "best_model.pth"))
+            # 保存模型时包含模型类型信息
+            model_save_path = os.path.join(ROOT_DIR, "model", f"best_{model_name}.pth")
+            torch.save(model.state_dict(), model_save_path)
             print(f"Model saved with validation accuracy: {val_acc:.2f}%")
 
     # 绘制训练曲线
@@ -233,4 +267,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()

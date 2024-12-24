@@ -2,7 +2,7 @@ import torch
 import os
 from pathlib import Path
 import numpy as np
-from model import ImprovedPianoClassifier, PianoDataset
+from model import ImprovedPianoClassifier, PianoDataset, PianoClassifier
 import matplotlib.pyplot as plt
 import random
 from sklearn.metrics import confusion_matrix
@@ -14,12 +14,30 @@ ROOT_DIR = Path(__file__).parent.parent
 def load_model(model_path, num_classes):
     """加载训练好的模型"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = ImprovedPianoClassifier(num_classes).to(device)
     
+    # 尝试加载模型状态以检查结构
     try:
         checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+        
+        # 通过检查模型参数来判断使用哪个模型类
+        if "features.0.weight" in checkpoint:
+            first_layer_shape = checkpoint["features.0.weight"].shape
+            if first_layer_shape[0] == 16:  # 如果第一层有16个通道，使用ImprovedPianoClassifier
+                model_class = ImprovedPianoClassifier
+                print("Detected ImprovedPianoClassifier structure")
+            else:  # 否则使用PianoClassifier
+                model_class = PianoClassifier
+                print("Detected PianoClassifier structure")
+        else:
+            raise ValueError("Unable to determine model type from checkpoint")
+            
+        # 创建相应的模型实例
+        model = model_class(num_classes).to(device)
+        
+        # 加载模型参数
         model.load_state_dict(checkpoint)
-        print("Model loaded successfully!")
+        print(f"Model loaded successfully! Using {model_class.__name__}")
+        
     except Exception as e:
         print(f"Error loading model: {str(e)}")
         raise
@@ -85,7 +103,30 @@ def evaluate_test_samples():
     
     # 加载模型
     num_classes = len(set(test_dataset.labels))
-    model_path = os.path.join(ROOT_DIR, "model", "best_model.pth")
+    
+    # 检查可用的模型文件
+    model_dir = os.path.join(ROOT_DIR, "model")
+    available_models = [f for f in os.listdir(model_dir) if f.endswith('.pth')]
+    
+    if not available_models:
+        raise FileNotFoundError("No model files found in the model directory")
+    
+    print("\nAvailable models:")
+    for i, model_file in enumerate(available_models, 1):
+        print(f"{i}. {model_file}")
+    
+    while True:
+        try:
+            choice = int(input("\nSelect model to load (enter number): "))
+            if 1 <= choice <= len(available_models):
+                model_path = os.path.join(model_dir, available_models[choice-1])
+                break
+            else:
+                print("Invalid choice. Please try again.")
+        except ValueError:
+            print("Please enter a valid number.")
+    
+    print(f"\nLoading model: {os.path.basename(model_path)}")
     model, device = load_model(model_path, num_classes)
     
     # 创建测试数据加载器
